@@ -1,20 +1,3 @@
-"""
-Algothon 2026 submission strategy.
-
-Big picture: we trade 50 of the 51 instruments (instrument 0, "ALGO", is just the
-equal-weight index of the other 50, so we leave it flat). The core bet is mean
-reversion - things that have drifted apart tend to come back together - run in two
-independent flavours that are then blended:
-
-  1. Pairs book (70%)    - Find instruments that move together ("tethered"), and when
-                           one drifts too far from its partner, bet the gap closes.
-  2. Residual book (30%) - Strip out the few big forces that push all names at once,
-                           then fade each name's remaining private drift.
-
-The two signals are only ~25% correlated, so blending them is steadier than either
-alone. Everything is kept market-neutral (equal long and short) and sized to a fixed
-gross exposure, capped at $10k per name. NumPy only - no extra packages.
-"""
 
 import numpy as np
 
@@ -29,7 +12,10 @@ GROSS = 700_000     # target gross dollar exposure (how much capital we deploy)
 
 # Pairs-book settings:
 ZW    = 30          # window (days) used to measure how "stretched" a spread is now
-MAXP  = 25          # keep at most this many pairs (the best-reverting ones)
+MAXP  = 20          # keep at most this many pairs (the best-reverting ones)
+                    # (tuned down from 25 -> 20: validated as a robust improvement
+                    # across 3 independent non-overlapping backtest window schemes;
+                    # trims marginal, slower-reverting pairs that were adding noise)
 FW    = 250         # look-back window (days) used to find pairs and their hedge ratios
 HLMAX = 15.0        # only trade pairs whose spread reverts within this many days
 REBAL = 20          # re-pick the pair list every this many days (not every day)
