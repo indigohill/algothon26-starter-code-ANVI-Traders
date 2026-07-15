@@ -36,13 +36,10 @@ Pipeline each day:
      floor zeros everything, the signal is empty and we stay flat this day.
   4. Predicted next-day residual per name = matrix^T . today's residuals, demeaned
      (market-neutral).
-  5. Size by SIGN at the full $10k per-name cap, thresholding at the
-     cross-sectional MEDIAN so exactly 25 names go long and 25 go short. Keeping
-     the book count-balanced keeps it close to dollar-neutral, so the small ALGO
-     hedge is always enough. A 30% hysteresis band keeps weak signal flips at
-     their prior direction to control commission churn - but a name cannot hold a
-     stale direction for more than MAX_HOLD days, so a persistently-weak name can
-     never accumulate a slow wrong-way bet.
+  5. Size by SIGN at the full $10k per-name cap - deploying the most capital,
+     which the score rewards (it pays deployed mean at high Sharpe). A 30%
+     hysteresis band keeps weak signal flips at their prior direction to control
+     commission churn.
   6. ALGO hedges the net dollar imbalance that integer rounding leaves (cheapest
      hedge available: 0.2bp commission, $100k cap). As a backstop, if the names
      book's net would exceed ALGO's hedge capacity we first trim the weakest names
@@ -60,16 +57,14 @@ MIN_HISTORY = 60          # days of returns needed before trading
 BETA_HL     = 120.0       # EWMA half-life (days) for the ALGO market-strip beta
 FLOOR_SE    = 1.0         # noise floor on matrix entries, in standard errors
 HYSTERESIS  = 0.30        # weak-signal band that keeps the prior direction
-MAX_HOLD    = 20          # max days a name may hold a stale (hysteresis) direction
 ASSET_CAP   = 10_000.0    # per-name dollar limit (competition rule)
 ALGO_CAP    = 100_000.0   # ALGO dollar limit (competition rule)
 
-_state = {"prev_dir": None, "hold": None, "last_nt": None}
+_state = {"prev_dir": None, "last_nt": None}
 
 
 def _reset_hysteresis():
     _state["prev_dir"] = None
-    _state["hold"] = None
 
 
 def getMyPosition(prcSoFar):
@@ -121,31 +116,21 @@ def getMyPosition(prcSoFar):
         _reset_hysteresis()
         return pos.astype(int)
 
-    # 5. sign sizing at full caps, thresholded at the MEDIAN so the book is
-    #    exactly count-balanced (25 long / 25 short).
-    tgt = np.sign(sig - np.median(sig))
-    tgt[tgt == 0] = 1.0                           # break the (rare) exact tie
-
-    # Hysteresis: keep the prior direction for weak signals to cut churn, but
-    # never let a name hold a stale direction longer than MAX_HOLD days.
+    # 5. sign sizing at full caps, with a hysteresis band that keeps weak-signal
+    #    names at their prior direction to control commission churn.
+    tgt = np.sign(sig)
     if _state["prev_dir"] is not None:
-        scale = np.mean(np.abs(sig)) or 1.0
-        weak = np.abs(sig) < HYSTERESIS * scale
-        keep = weak & (_state["hold"] < MAX_HOLD)
-        tgt = np.where(keep, _state["prev_dir"], tgt)
-        _state["hold"] = np.where(keep, _state["hold"] + 1, 0)
-    else:
-        _state["hold"] = np.zeros(50)
-    _state["prev_dir"] = tgt.copy()
+        weak = np.abs(sig) < HYSTERESIS * (np.mean(np.abs(sig)) or 1.0)
+        tgt = np.where(weak, _state["prev_dir"], tgt)
+    _state["prev_dir"] = np.sign(tgt).copy()
 
     px = prc[:, -1]
     caps = (ASSET_CAP / px[1:]).astype(int)       # whole-share cap per name
     pos[1:] = np.clip(np.rint(tgt * caps), -caps, caps)
 
-    # 6a. backstop: the names book is count-balanced (25 long / 25 short) so its
-    #     net dollar exposure is normally negligible, but hysteresis can unbalance
-    #     it. Trim the weakest-signal names on the heavy side so the net never
-    #     exceeds what ALGO can hedge (and the book never carries a naked bet).
+    # 6a. backstop: sign sizing can leave a net dollar imbalance. Trim the
+    #     weakest-signal names on the heavy side so the net never exceeds what
+    #     ALGO can hedge (and the book never carries a naked directional bet).
     dollars = pos[1:] * px[1:]
     net = dollars.sum()
     order = np.argsort(np.abs(sig))               # weakest signal first
