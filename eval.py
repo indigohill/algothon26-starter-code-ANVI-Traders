@@ -83,7 +83,7 @@ def calcPL(prcHist, numTestDays):
     
     for t in range(startDay, nt + 1):
         # price history up to and including t, e.g. if t=500, gets first 500 days
-        prcHistSoFar = prcHist[:, :t]
+        prcHistSoFar = prcHist[:, :t] 
         curPrices = prcHistSoFar[:, -1]
 
         # trading loop, do not do it on the very last day of the test
