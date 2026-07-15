@@ -39,11 +39,17 @@ Pipeline each day:
      their prior direction to control commission churn - but a name cannot hold a
      stale direction for more than MAX_HOLD days, so a persistently-weak name can
      never accumulate a slow wrong-way bet.
-  6. ALGO takes the opposite of whatever net dollar imbalance integer rounding
-     leaves (cheapest hedge available: 0.2bp commission, $100k cap). As a hard
-     backstop, if that imbalance would ever exceed ALGO's hedge capacity we trim
-     the weakest-signal names on the heavy side until it fits, so the book can
-     never carry a naked directional bet.
+  6. ALGO alpha sleeve. ALGO carries a strong next-day autocorrelation (|IC|
+     ~ 0.09, larger than the cross-sectional spillover) and trades at 1/5th the
+     commission (0.2bp) with a $100k cap that the names book - kept near-neutral
+     by the median split - no longer needs for hedging. We deploy that capacity:
+     estimate an AR(1) coefficient over a couple of trailing windows and trade
+     the ensemble's predicted next-day move at full cap. Crucially ALGO's own
+     autocorrelation SIGN flips between regimes (momentum vs reversion), so a
+     trailing (rather than full-history) estimate lets the sleeve self-select the
+     current regime instead of hard-coding one that would blow up when it flips.
+     A dormant risk cap still trims the weakest names if hysteresis ever pushes
+     the names book past ALGO_CAP of naked directional exposure.
 
 NumPy only - no other packages required.
 """
@@ -54,6 +60,7 @@ MIN_HISTORY = 60          # days of returns needed before trading
 FLOOR_SE    = 1.0         # noise floor on matrix entries, in standard errors
 HYSTERESIS  = 0.30        # weak-signal band that keeps the prior direction
 MAX_HOLD    = 20          # max days a name may hold a stale (hysteresis) direction
+ALGO_WINS   = (60, 120)   # trailing windows (days) for the ALGO AR(1) timing sleeve
 ASSET_CAP   = 10_000.0    # per-name dollar limit (competition rule)
 ALGO_CAP    = 100_000.0   # ALGO dollar limit (competition rule)
 
@@ -133,8 +140,10 @@ def getMyPosition(prcSoFar):
     caps = (ASSET_CAP / px[1:]).astype(int)       # whole-share cap per name
     pos[1:] = np.clip(np.rint(tgt * caps), -caps, caps)
 
-    # 6a. hard backstop: never carry net exposure the ALGO hedge can't absorb.
-    #     Trim the weakest-signal names on the heavy side until |net| fits.
+    # 6a. dormant risk cap: the names book is count-balanced (25 long / 25 short)
+    #     so its net dollar exposure is normally negligible, but hysteresis can
+    #     unbalance it. Trim the weakest-signal names on the heavy side so the
+    #     names book can never carry more than ALGO_CAP of naked directional bet.
     dollars = pos[1:] * px[1:]
     net = dollars.sum()
     order = np.argsort(np.abs(sig))               # weakest signal first
@@ -147,9 +156,17 @@ def getMyPosition(prcSoFar):
             dollars[idx] = 0.0
         k += 1
 
-    # 6b. ALGO hedges the remaining net dollar imbalance
-    hedge = np.clip(-net, -0.999 * ALGO_CAP, 0.999 * ALGO_CAP)
+    # 6b. ALGO alpha sleeve: trade the ensemble AR(1) prediction of ALGO's own
+    #     next-day return over a couple of trailing windows (regime self-select).
+    ra_full = R[0]
+    pred = 0.0
+    for win in ALGO_WINS:
+        a = ra_full[-win:]
+        a = a - a.mean()
+        denom = a[:-1] @ a[:-1]
+        if denom > 1e-18:
+            pred += (a[:-1] @ a[1:]) / denom * ra_full[-1]   # phi * today's move
     algo_cap_sh = int(ALGO_CAP / px[0])
-    pos[0] = np.clip(np.trunc(hedge / px[0]), -algo_cap_sh, algo_cap_sh)
+    pos[0] = np.sign(pred) * algo_cap_sh
 
     return np.nan_to_num(pos).astype(int)
