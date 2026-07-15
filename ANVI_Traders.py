@@ -20,11 +20,15 @@ do).
 
 Pipeline each day:
   1. Residualize each of the 50 names against ALGO using an ESTIMATED regression
-     beta over all available history. ALGO is the equal-weight index of the names
-     (verified: corr 0.993), so this strips the common market move properly. We
-     deliberately do NOT remove PCA factors - testing showed the spillover web
-     lives in and around the factor/cluster structure, and factor-stripping
-     destroys it (worst-window score 17 vs 246).
+     beta, EWMA-weighted (half-life BETA_HL days) toward recent data. ALGO is the
+     equal-weight index of the names (verified: corr 0.993), so this strips the
+     common market move properly. Betas drift ~15% between the two halves of the
+     data, so a recency-weighted beta residualizes the recent regime more cleanly
+     than an equal-weight full-history beta - it lifts the score in every tested
+     window, robustly across half-lives from 90 to 150 days. We deliberately do
+     NOT remove PCA factors - testing showed the spillover web lives in and around
+     the factor/cluster structure, and factor-stripping destroys it (worst-window
+     score 17 vs 246).
   2. Standardize each residual series over the expanding history.
   3. Estimate the 50x50 lagged cross-correlation matrix (i today -> j tomorrow)
      and zero every entry below a 1-standard-error noise floor. Harder floors
@@ -57,6 +61,7 @@ NumPy only - no other packages required.
 import numpy as np
 
 MIN_HISTORY = 60          # days of returns needed before trading
+BETA_HL     = 120.0       # EWMA half-life (days) for the ALGO market-strip beta
 FLOOR_SE    = 1.0         # noise floor on matrix entries, in standard errors
 HYSTERESIS  = 0.30        # weak-signal band that keeps the prior direction
 MAX_HOLD    = 20          # max days a name may hold a stale (hysteresis) direction
@@ -87,13 +92,15 @@ def getMyPosition(prcSoFar):
     if T < MIN_HISTORY or n != 51:
         return pos.astype(int)
 
-    # 1. market-strip with an estimated beta per name (expanding window)
+    # 1. market-strip with an EWMA (recency-weighted) beta per name
     ra = R[0]                                     # ALGO = the market
-    rac = ra - ra.mean()
-    var_a = (rac * rac).mean() + 1e-18
     X = R[1:]
-    Xc = X - X.mean(1, keepdims=True)
-    beta = (Xc @ rac) / (len(ra) * var_a)         # cov(name, ALGO) / var(ALGO)
+    lam = 0.5 ** (1.0 / BETA_HL)
+    w = lam ** np.arange(T - 1, -1, -1); w = w / w.sum()   # weights, recent-heavy
+    rac = ra - (ra * w).sum()                     # weighted-demeaned ALGO
+    var_a = (w * rac * rac).sum() + 1e-18         # weighted var(ALGO)
+    Xc = X - (X * w).sum(1, keepdims=True)         # weighted-demeaned names
+    beta = ((Xc * w) @ rac) / var_a               # weighted cov(name, ALGO) / var
     res = X - beta[:, None] * ra[None, :]         # market-neutral residuals
 
     # 2. standardize each residual series over its history
